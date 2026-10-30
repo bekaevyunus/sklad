@@ -1,13 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="96" fill="#1f6f5c"/>
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3b9bff"/>
+      <stop offset="1" stop-color="#0060df"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="114" fill="url(#g)"/>
   <g fill="#fff">
-    <rect x="112" y="150" width="20" height="212"/>
-    <rect x="152" y="150" width="10" height="212"/>
-    <rect x="182" y="150" width="30" height="212"/>
-    <rect x="232" y="150" width="10" height="212"/>
-    <rect x="262" y="150" width="20" height="212"/>
-    <rect x="302" y="150" width="10" height="212"/>
-    <rect x="332" y="150" width="30" height="212"/>
-    <rect x="382" y="150" width="18" height="212"/>
+    <rect x="120" y="156" width="18" height="200" rx="4"/>
+    <rect x="156" y="156" width="10" height="200" rx="3"/>
+    <rect x="184" y="156" width="28" height="200" rx="4"/>
+    <rect x="230" y="156" width="10" height="200" rx="3"/>
+    <rect x="258" y="156" width="20" height="200" rx="4"/>
+    <rect x="296" y="156" width="10" height="200" rx="3"/>
+    <rect x="324" y="156" width="28" height="200" rx="4"/>
+    <rect x="370" y="156" width="18" height="200" rx="4"/>
   </g>
 </svg>

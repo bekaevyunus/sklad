@@ -107,26 +107,41 @@ const VIEWS = {
   staff: { title: "Сотрудники", render: renderStaff, admin: true },
 };
 
+// Иконки для нижней панели (в стиле SF Symbols)
+const ICONS = {
+  sale: '<path d="M3 4h2l2.4 10.2a2 2 0 0 0 2 1.6h7.7a2 2 0 0 0 2-1.5L21 8H6.2"/><circle cx="10" cy="20" r="1.4"/><circle cx="17" cy="20" r="1.4"/>',
+  receive: '<path d="M21 8.5 12 4 3 8.5v7L12 20l9-4.5z"/><path d="M3 8.5 12 13l9-4.5M12 13v7"/>',
+  products: '<rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="7" rx="2"/><rect x="3.5" y="13.5" width="7" height="7" rx="2"/><rect x="13.5" y="13.5" width="7" height="7" rx="2"/>',
+  reports: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
+  staff: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><circle cx="17.5" cy="9" r="2.5"/><path d="M16 14.2a5 5 0 0 1 6 4.8"/>',
+};
+const icon = (k) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICONS[k]}</svg>`;
+
 function render() {
   const app = $("#app");
   if (!state.user) return renderLogin(app);
   const isAdmin = state.user.role === "admin";
+  const v = VIEWS[state.view] || VIEWS.sale;
   app.innerHTML = `
     <header class="top">
-      <span class="brand">Склад</span>
-      <span class="who">
-        <span class="sync" title="Синхронизировано"></span>
-        <span>${esc(state.user.name)}${isAdmin ? " · владелец" : ""}</span>
-        <button id="logout">Выйти</button>
-      </span>
+      <div class="top-bar">
+        <span class="who"><span class="sync" title="Синхронизировано"></span>${esc(state.user.name)}<span class="role">${isAdmin ? "владелец" : "продавец"}</span></span>
+        <button id="logout" class="link">Выйти</button>
+      </div>
     </header>
-    <nav class="nav">
-      ${Object.entries(VIEWS).filter(([, v]) => !v.admin || isAdmin)
-        .map(([k, v]) => `<button data-view="${k}" class="${state.view === k ? "on" : ""}">${v.title}</button>`).join("")}
-    </nav>
-    <main id="main"></main>`;
-  $("#logout").onclick = async () => { await api("POST", "/api/logout").catch(() => {}); state.user = null; render(); };
-  app.querySelectorAll(".nav button").forEach((b) => (b.onclick = () => { state.view = b.dataset.view; render(); }));
+    <main>
+      <h1 class="large-title">${v.title}</h1>
+      <div id="main"></div>
+    </main>
+    <nav class="tabbar">
+      ${Object.entries(VIEWS).filter(([, x]) => !x.admin || isAdmin)
+        .map(([k, x]) => `<button data-view="${k}" class="${state.view === k ? "on" : ""}">${icon(k)}<span>${x.title}</span></button>`).join("")}
+    </nav>`;
+  $("#logout").onclick = async () => {
+    if (!confirm("Выйти из аккаунта?")) return;
+    await api("POST", "/api/logout").catch(() => {}); state.user = null; render();
+  };
+  app.querySelectorAll(".tabbar button").forEach((b) => (b.onclick = () => { state.view = b.dataset.view; render(); window.scrollTo(0, 0); }));
   setOnline(state.online);
   refreshView();
 }
@@ -143,7 +158,9 @@ function refreshView() {
 function renderLogin(app) {
   app.innerHTML = `
     <form class="card login form" id="login">
+      <div class="login-icon"><img src="/icon.svg" alt=""></div>
       <div class="brand">Склад</div>
+      <div class="muted" style="text-align:center;margin:-8px 0 8px">Учёт товаров и продаж</div>
       <label>Имя<input type="text" name="name" autocomplete="username" required></label>
       <label>Пароль<input type="password" name="password" autocomplete="current-password" required></label>
       <button class="btn big">Войти</button>
@@ -163,7 +180,7 @@ function scanBox(placeholder) {
   return `
     <div class="scan">
       <input id="scan" type="text" inputmode="search" autocomplete="off" placeholder="${esc(placeholder)}">
-      <button class="btn icon" id="cam" title="Сканировать камерой">📷</button>
+      <button class="btn icon" id="cam" title="Сканировать камерой"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M7 9v6M10 9v6M13 9v6M16.5 9v6"/></svg></button>
     </div>
     <div id="suggest"></div>
     <div class="scan-hint">Сканируйте штрих-код сканером или камерой, либо начните вводить название.</div>`;
@@ -249,7 +266,7 @@ async function openCamera(onCode) {
   back.className = "modal-back";
   back.innerHTML = `
     <div class="modal">
-      <h2>Наведите на штрих-код <button class="x" id="cam-close">✕</button></h2>
+      <div class="grabber"></div><h2><span>Наведите на штрих-код</span><button class="x close" id="cam-close" aria-label="Закрыть">✕</button></h2>
       <div id="cam-area"></div>
       <p class="muted">Держите телефон на расстоянии 10–20 см, штрих-код — внутри рамки.</p>
     </div>`;
@@ -316,7 +333,7 @@ function loadScript(src) {
 function modal(title, html, onMount) {
   const back = document.createElement("div");
   back.className = "modal-back";
-  back.innerHTML = `<div class="modal"><h2>${esc(title)} <button class="x" data-close>✕</button></h2>${html}</div>`;
+  back.innerHTML = `<div class="modal"><div class="grabber"></div><h2><span>${esc(title)}</span><button class="x close" data-close aria-label="Закрыть">✕</button></h2>${html}</div>`;
   document.body.appendChild(back);
   const close = () => { back.remove(); refreshView(); };
   back.querySelector("[data-close]").onclick = close;
@@ -327,6 +344,7 @@ function modal(title, html, onMount) {
 }
 
 // ---------- Фото товара ----------
+const PHOTO_PH = `<span class="ph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9a2 2 0 0 1 2-2h2l1.5-2h7L17 7h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="3.5"/></svg></span>`;
 const imgSrc = (p) => (p && p.image ? "/images/" + p.image : "");
 const thumb = (p, size = 40) => p && p.image
   ? `<img class="thumb" style="width:${size}px;height:${size}px" src="${esc(imgSrc(p))}" alt="" loading="lazy">`
@@ -392,7 +410,7 @@ function productCard(p) {
       </div>
     </div>
     <div class="row" style="margin-top:14px">
-      <button class="btn light" id="pc-photo">📷 ${p.image ? "Заменить фото" : "Добавить фото"}</button>
+      <button class="btn light" id="pc-photo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9a2 2 0 0 1 2-2h2l1.5-2h7L17 7h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="3.5"/></svg> ${p.image ? "Заменить фото" : "Добавить фото"}</button>
       <button class="btn light" id="pc-cart">🛒 В корзину</button>
       ${isAdmin ? `<button class="btn" id="pc-edit">✏️ Изменить</button>` : ""}
     </div>`, (root, close) => {
@@ -573,7 +591,7 @@ function renderProducts(main) {
     <div class="toolbar">
       <input type="search" id="pq" placeholder="Поиск по названию или штрих-коду" value="${esc(productQuery)}">
       <button class="btn" id="add">+ Товар</button>
-      ${isAdmin ? `<a class="btn ghost" href="/api/export.csv" download>⬇ Excel</a>` : ""}
+      ${isAdmin ? `<a class="btn ghost" href="/api/export.csv" download title="Выгрузить остатки в Excel">Excel</a>` : ""}
     </div>
     <div class="periods cats">
       <button data-cat="" class="${productCat ? "" : "on"}">Все · ${found.length}</button>
@@ -617,7 +635,7 @@ function productForm(p, barcode = "") {
   modal(isNew ? "Новый товар" : "Изменить товар", `
     <form class="form" id="pf">
       <div class="pf-photo">
-        <div class="pf-img" id="pf-img">${p?.image ? `<img src="${esc(imgSrc(p))}" alt="">` : `<span>📷</span>`}</div>
+        <div class="pf-img" id="pf-img">${p?.image ? `<img src="${esc(imgSrc(p))}" alt="">` : PHOTO_PH}</div>
         <div class="pf-photo-btns">
           <button type="button" class="btn light" id="pf-shot">${p?.image ? "Заменить фото" : "Сфотографировать"}</button>
           <button type="button" class="btn ghost" id="pf-noimg" ${p?.image ? "" : "hidden"}>Убрать фото</button>
@@ -626,8 +644,8 @@ function productForm(p, barcode = "") {
       </div>
       <label>Штрих-код
         <div class="scan"><input name="barcode" type="text" value="${esc(p?.barcode ?? barcode)}" placeholder="Можно оставить пустым">
-        <button type="button" class="btn icon light" id="pf-cam" title="Сканировать камерой">📷</button>
-        <button type="button" class="btn icon light" id="pf-find" title="Найти по штрих-коду">🔍</button></div>
+        <button type="button" class="btn icon light" id="pf-cam" title="Сканировать камерой"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M7 9v6M10 9v6M13 9v6M16.5 9v6"/></svg></button>
+        <button type="button" class="btn icon light" id="pf-find" title="Найти по штрих-коду"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></button></div>
       </label>
       <div id="pf-found" class="found" hidden></div>
       <label>Название<input name="name" type="text" value="${esc(p?.name || "")}" required autocomplete="off"></label>
@@ -651,9 +669,9 @@ function productForm(p, barcode = "") {
     const f = $("#pf", root);
     const imgBox = $("#pf-img", root);
     const setPreview = (src) => {
-      imgBox.innerHTML = src ? `<img src="${esc(src)}" alt="" referrerpolicy="no-referrer">` : `<span>📷</span>`;
+      imgBox.innerHTML = src ? `<img src="${esc(src)}" alt="" referrerpolicy="no-referrer">` : PHOTO_PH;
       const im = imgBox.querySelector("img");
-      if (im) im.onerror = () => { imgBox.innerHTML = `<span>📷</span>`; if (photo.url === src) photo.url = null; };
+      if (im) im.onerror = () => { imgBox.innerHTML = PHOTO_PH; if (photo.url === src) photo.url = null; };
       $("#pf-noimg", root).hidden = !src;
       $("#pf-shot", root).textContent = src ? "Заменить фото" : "Сфотографировать";
     };
