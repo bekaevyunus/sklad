@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS lookup_cache (
 );
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 INSERT OR IGNORE INTO meta (key, value) VALUES ('version', '1');
+DELETE FROM lookup_cache WHERE data IS NULL;
 `);
 
 // ---------- Пароли и сессии ----------
@@ -413,7 +414,7 @@ const UA = "Sklad/1.0 (inventory app; https://github.com/bekaevyunus/sklad)";
 async function getJson(url) {
   const res = await fetch(url, { headers: { "User-Agent": UA, Accept: "application/json" }, signal: AbortSignal.timeout(6000) });
   if (!res.ok) return null;
-  return res.json();
+  return res.json().catch(() => null);
 }
 
 // Семейство баз Open Facts: продукты, косметика и бытовая химия, прочие товары, корм для животных
@@ -442,6 +443,57 @@ async function fromUpcItemDb(code) {
   return { name: str(it.title), brand: str(it.brand), quantity: "", image: it.images?.[0] || "", source: "UPCitemdb" };
 }
 
+// ---- Российские источники ----
+const BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
+
+async function getText(url) {
+  const res = await fetch(url, { headers: { "User-Agent": BROWSER_UA, "Accept-Language": "ru" }, signal: AbortSignal.timeout(8000) });
+  if (!res.ok) return null;
+  const buf = Buffer.from(await res.arrayBuffer());
+  // Кодировку берём из заголовка или <meta charset>; старые русские сайты бывают в windows-1251
+  const head = buf.subarray(0, 2048).toString("latin1");
+  const cs = (res.headers.get("content-type") || "").match(/charset=([\w-]+)/i)?.[1]
+    || head.match(/charset=["']?([\w-]+)/i)?.[1] || "utf-8";
+  try { return new TextDecoder(cs.toLowerCase()).decode(buf); } catch { return buf.toString("utf8"); }
+}
+
+const decodeHtml = (s) => s
+  .replace(/<[^>]+>/g, " ")
+  .replace(/&nbsp;/g, " ").replace(/&quot;/g, '"').replace(/&#0*39;|&apos;/g, "'")
+  .replace(/&laquo;/g, "«").replace(/&raquo;/g, "»").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+  .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n))).replace(/&amp;/g, "&")
+  .replace(/\s+/g, " ").trim();
+
+// barcode-list.ru — крупнейшая русскоязычная база штрих-кодов (названия присылают пользователи)
+async function fromBarcodeList(code) {
+  const html = await getText(`https://barcode-list.ru/barcode/RU/${encodeURIComponent("Поиск")}.htm?barcode=${code}`);
+  if (!html) return null;
+  // В таблице результатов ищем строки с нашим штрих-кодом и берём из них ячейку с названием
+  const names = [];
+  for (const row of html.match(/<tr[\s\S]*?<\/tr>/gi) || []) {
+    if (!row.includes(code)) continue;
+    const cells = (row.match(/<td[\s\S]*?<\/td>/gi) || []).map(decodeHtml);
+    const name = cells
+      .filter((c) => c && !c.includes(code) && !/^[\d\s.,]+$/.test(c) && c.length > 3 && !/^(шт|кг|л|г|упак|уп)\.?$/i.test(c))
+      .sort((a, b) => b.length - a.length)[0];
+    if (name) names.push(name);
+  }
+  if (!names.length) return null;
+  return { name: names[0], brand: "", quantity: "", image: "", source: "barcode-list.ru" };
+}
+
+// «Честный знак»: открытая проверка кода, которой пользуется их мобильное приложение
+async function fromChestnyZnak(code) {
+  const ean = code.padStart(13, "0");
+  const d = await getJson(`https://mobile.api.crpt.ru/mobile/check?code=${ean}&codeType=ean13`);
+  if (!d) return null;
+  const pick = (o) => o && (o.productName || o.name || o.product_name || o.goodName);
+  const name = str(pick(d) || pick(d.catalogData?.[0]) || pick(d.product) || pick(d.drugsData) || pick(d.milkData));
+  if (!name || /не найден/i.test(name)) return null;
+  const brand = str(d.brand || d.catalogData?.[0]?.brandName || d.producerName || "");
+  return { name, brand: brand.length < 40 ? brand : "", quantity: "", image: "", source: "Честный знак" };
+}
+
 // Собираем понятное название: «Бренд Название, объём»
 function fullName(r) {
   let name = r.name;
@@ -456,7 +508,14 @@ async function lookupBarcode(code) {
   if (cached && (cached.data || Date.now() - Date.parse(cached.created + "Z") < 7 * 86400000)) {
     return cached.data ? JSON.parse(cached.data) : null;
   }
-  const tries = [...OPEN_FACTS.map((s) => () => fromOpenFacts(s, code)), () => fromUpcItemDb(code)];
+  // Порядок = приоритет: сначала самые аккуратные названия
+  const tries = [
+    () => fromOpenFacts(OPEN_FACTS[0], code),
+    () => fromChestnyZnak(code),
+    () => fromBarcodeList(code),
+    ...OPEN_FACTS.slice(1).map((s) => () => fromOpenFacts(s, code)),
+    () => fromUpcItemDb(code),
+  ];
   // Опрашиваем все базы одновременно, берём ответ самой приоритетной
   const results = await Promise.all(tries.map((t) => t().catch(() => "error")));
   const found = results.find((r) => r && r !== "error") || null;
@@ -468,6 +527,24 @@ async function lookupBarcode(code) {
   }
   return out;
 }
+
+// Проверка источников: открыть в браузере /api/lookup-debug/ШТРИХКОД — видно, что ответила каждая база
+route("GET", "/api/lookup-debug/:code", async (req, res, { params }) => {
+  const code = decodeURIComponent(params.code).replace(/\s/g, "");
+  if (!/^\d{8,14}$/.test(code)) throw bad("Нужен штрих-код из 8–14 цифр");
+  const sources = {
+    "Open Food Facts": () => fromOpenFacts(OPEN_FACTS[0], code),
+    "Честный знак": () => fromChestnyZnak(code),
+    "barcode-list.ru": () => fromBarcodeList(code),
+    "Open Beauty/Products/Pet": async () => (await Promise.all(OPEN_FACTS.slice(1).map((s) => fromOpenFacts(s, code)))).find(Boolean) || null,
+    "UPCitemdb": () => fromUpcItemDb(code),
+  };
+  const out = {};
+  await Promise.all(Object.entries(sources).map(async ([k, f]) => {
+    try { out[k] = (await f())?.name || "не найдено"; } catch (e) { out[k] = "ошибка связи: " + (e.cause?.code || e.name || e.message); }
+  }));
+  send(res, 200, out);
+}, { auth: "admin" });
 
 route("GET", "/api/lookup/:code", async (req, res, { params }) => {
   const code = decodeURIComponent(params.code).replace(/\s/g, "");
