@@ -171,7 +171,7 @@ function bindScan(onProduct, onUnknown) {
   const pick = (p) => { input.value = ""; box.innerHTML = ""; onProduct(p); input.focus(); };
 
   async function lookup(code) {
-    code = code.trim();
+    code = normCode(code);
     if (!code) return;
     const local = state.products.find((p) => p.barcode === code);
     if (local) { beep(); return pick(local); }
@@ -229,7 +229,16 @@ document.addEventListener("keydown", (e) => {
 });
 
 // ---------- Камера ----------
-const FORMATS = ["ean_13", "ean_8", "upc_a", "upc_e", "code_128", "code_39", "itf", "qr_code"];
+const FORMATS = ["ean_13", "ean_8", "upc_a", "upc_e", "code_128", "code_39", "itf", "qr_code", "data_matrix"];
+
+// Код маркировки «Честный знак» (DataMatrix на воде, молочке и т.п.) содержит внутри обычный штрих-код:
+// 01 + 14 цифр GTIN + 21 + серийный номер… Достаём из него EAN-13, чтобы товар находился как по обычному штрих-коду.
+function normCode(raw) {
+  let c = String(raw ?? "").trim().replace(/^\]d2|^\]Q3|^\]C1/, "").replace(/[\u001d\u00e8]/g, "");
+  const m = c.match(/^\(?01\)?(\d{14})/);
+  if (m && c.length > 16) c = m[1].startsWith("0") ? m[1].slice(1) : m[1];
+  return c;
+}
 
 async function openCamera(onCode) {
   const back = document.createElement("div");
@@ -550,12 +559,12 @@ function productForm(p, barcode = "") {
       }
     };
     $("#pf-find", root).onclick = () => findName(false);
-    $("#pf-cam", root).onclick = () => openCamera((code) => { f.barcode.value = code; beep(); if (isNew) findName(true); });
+    $("#pf-cam", root).onclick = () => openCamera((code) => { f.barcode.value = normCode(code); beep(); if (isNew) findName(true); });
     if (isNew && barcode) findName(true);
     f.onsubmit = async (e) => {
       e.preventDefault();
       const body = {
-        name: f.name.value, barcode: f.barcode.value, qty: f.qty.value || 0,
+        name: f.name.value, barcode: normCode(f.barcode.value), qty: f.qty.value || 0,
         buy_price: f.buy_price.value || 0, sell_price: f.sell_price.value || 0,
       };
       try {
