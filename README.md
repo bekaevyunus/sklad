@@ -17,25 +17,13 @@
 
 Нужен любой VPS с Linux (Ubuntu 22.04 или 24.04), например у Timeweb Cloud, Beget или Selectel, от 1 ГБ памяти. Обычно это 200–400 ₽ в месяц, оплата российской картой.
 
-1. Подключитесь к серверу по SSH и установите Docker:
+1. Подключитесь к серверу. На Windows откройте PowerShell и введите `ssh root@IP-сервера`, затем пароль из письма хостинга.
+2. Выполните одну команду:
    ```bash
-   curl -fsSL https://get.docker.com | sh
+   bash <(curl -fsSL https://raw.githubusercontent.com/bekaevyunus/sklad/main/install.sh)
    ```
-2. Скачайте приложение:
-   ```bash
-   git clone https://github.com/bekaevyunus/sklad.git
-   cd sklad
-   cp .env.example .env
-   nano .env
-   ```
-   В `.env` укажите:
-   - `DOMAIN` — адрес сайта. Если своего домена нет, возьмите IP сервера и замените точки на дефисы: `185-10-20-30.sslip.io`;
-   - `ADMIN_PASSWORD` — пароль владельца.
-3. Запустите:
-   ```bash
-   docker compose up -d --build
-   ```
-4. Откройте в браузере `https://ваш-домен` и войдите под именем `admin` с вашим паролем.
+   Скрипт сам установит Docker, скачает приложение в `/opt/sklad` и спросит адрес сайта (Enter — адрес вида `1-2-3-4.sslip.io` по IP сервера) и пароль владельца.
+3. Откройте в браузере адрес, который покажет скрипт, и войдите под своим именем и паролем.
 
 **https обязателен:** без него браузер телефона не даст включить камеру. Caddy получает сертификат автоматически.
 
@@ -47,14 +35,16 @@
 ### Обновление
 
 ```bash
-cd sklad && git pull && docker compose up -d --build
+bash /opt/sklad/install.sh
 ```
+Данные и настройки при обновлении сохраняются.
 
 ### Резервная копия
 
-Вся база — один файл `data/sklad.db`. Регулярно скачивайте его, например так:
+Копия базы делается **каждую ночь** автоматически в `/opt/sklad/backups` и хранится 30 дней. Сделать копию вручную: `/opt/sklad/backup.sh`.
+Чтобы скачать копию на свой компьютер, введите в PowerShell на компьютере:
 ```bash
-cp data/sklad.db ~/sklad-$(date +%F).db
+scp root@IP-сервера:/opt/sklad/backups/* .
 ```
 
 ## Запуск на своём компьютере (Windows) вместо сервера
