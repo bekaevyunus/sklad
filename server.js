@@ -636,6 +636,94 @@ async function lookupBarcode(code) {
   return out;
 }
 
+// ---------- Проверка кода маркировки «Честный знак» ----------
+// Используется открытая проверка, которой пользуется официальное приложение «Честный знак».
+// Она не документирована, поэтому ответ разбираем гибко и показываем «сырые» данные в подробностях.
+const CHZ_STATUS = {
+  EMITTED: ["Код выпущен, но не нанесён на товар", "warn"],
+  APPLIED: ["Нанесён, но не введён в оборот", "warn"],
+  INTRODUCED: ["В обороте — товар легальный", "ok"],
+  IN_CIRCULATION: ["В обороте — товар легальный", "ok"],
+  RETIRED: ["Выведен из оборота (уже продан)", "warn"],
+  WRITTEN_OFF: ["Списан", "bad"],
+  WITHDRAWN: ["Выведен из оборота", "warn"],
+  DISAGGREGATION: ["Расформирован", "warn"],
+};
+
+// Ищем значение по одному из ключей на любой глубине ответа
+function deepFind(obj, keys, depth = 0) {
+  if (!obj || typeof obj !== "object" || depth > 5) return undefined;
+  for (const k of keys) if (obj[k] !== undefined && obj[k] !== null && obj[k] !== "") return obj[k];
+  for (const v of Object.values(obj)) {
+    const r = deepFind(v, keys, depth + 1);
+    if (r !== undefined) return r;
+  }
+  return undefined;
+}
+
+async function chzRequest(code) {
+  const type = /^\d{8,14}$/.test(code) ? "ean13" : "datamatrix";
+  const base = "https://mobile.api.crpt.ru";
+  const headers = { "User-Agent": BROWSER_UA, Accept: "application/json" };
+  const attempts = [
+    () => fetch(`${base}/mobile/check?code=${encodeURIComponent(code)}&codeType=${type}`, { headers, signal: AbortSignal.timeout(9000) }),
+    () => fetch(`${base}/v2/mobile/check`, {
+      method: "POST", headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify({ code, codeType: type }), signal: AbortSignal.timeout(9000),
+    }),
+  ];
+  let lastErr;
+  for (const go of attempts) {
+    try {
+      const res = await go();
+      const text = await res.text();
+      let data = null;
+      try { data = JSON.parse(text); } catch { /* не JSON */ }
+      if (data && (res.ok || res.status === 404)) return { http: res.status, data };
+      lastErr = new Error(`сервер ответил ${res.status}`);
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error("нет ответа");
+}
+
+route("GET", "/api/chz/check", async (req, res, { query }) => {
+  const code = String(query.get("code") || "").replace(/[\r\n]/g, "").trim();
+  if (code.length < 8) throw bad("Отсканируйте код маркировки (квадратный DataMatrix на упаковке)");
+  const gtinMatch = code.match(/^\(?01\)?(\d{14})/);
+  const gtin = gtinMatch ? gtinMatch[1] : (/^\d{8,14}$/.test(code) ? code.padStart(14, "0") : "");
+  const ean = gtin ? gtin.replace(/^0/, "") : "";
+  const local = ean ? db.prepare("SELECT id, name FROM products WHERE barcode = ? OR barcode = ?").get(ean, gtin) : null;
+
+  let r;
+  try { r = await chzRequest(code); }
+  catch (e) {
+    return send(res, 200, { verdict: "error", title: "Нет связи с «Честным знаком»", text: e.message, gtin, local });
+  }
+  const d = r.data || {};
+  const found = deepFind(d, ["codeFounded", "found", "isFound"]);
+  const statusRaw = String(deepFind(d, ["status", "cisStatus", "state"]) || "").toUpperCase();
+  const name = deepFind(d, ["productName", "name", "goodName", "product_name"]);
+  const producer = deepFind(d, ["producerName", "manufacturerName", "producer", "ownerName"]);
+  const expire = deepFind(d, ["expireDate", "expirationDate", "expiration_date", "expDate", "bestBefore"]);
+  const group = deepFind(d, ["productGroup", "category", "pg", "productGroupName"]);
+  const countryName = deepFind(d, ["country", "countryName", "producerCountry"]);
+  const st = CHZ_STATUS[statusRaw];
+
+  let verdict, title;
+  if (found === false || r.http === 404) { verdict = "bad"; title = "Код не найден в системе «Честный знак»"; }
+  else if (st) { verdict = st[1]; title = st[0]; }
+  else if (name) { verdict = "ok"; title = "Код найден в системе"; }
+  else { verdict = "unknown"; title = "Не удалось разобрать ответ"; }
+  // Просроченный товар
+  if (expire && Date.parse(expire) && Date.parse(expire) < Date.now()) { verdict = "bad"; title = "Срок годности истёк"; }
+
+  send(res, 200, {
+    verdict, title, status: statusRaw || null, name: name || null, producer: typeof producer === "string" ? producer : null,
+    expire: expire || null, group: typeof group === "string" ? group : null, country: typeof countryName === "string" ? countryName : null,
+    gtin, ean, local, codeType: /^\d{8,14}$/.test(code) ? "ean13" : "datamatrix", raw: d,
+  });
+});
+
 // Проверка источников: открыть в браузере /api/lookup-debug/ШТРИХКОД — видно, что ответила каждая база
 route("GET", "/api/lookup-debug/:code", async (req, res, { params }) => {
   const code = decodeURIComponent(params.code).replace(/\s/g, "");

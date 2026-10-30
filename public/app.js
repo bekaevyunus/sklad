@@ -103,6 +103,7 @@ const VIEWS = {
   sale: { title: "Продажа", render: renderSale },
   receive: { title: "Приход", render: renderReceive },
   products: { title: "Товары", render: renderProducts },
+  check: { title: "Проверка", render: renderCheck },
   reports: { title: "Отчёты", render: renderReports, admin: true },
   staff: { title: "Сотрудники", render: renderStaff, admin: true },
 };
@@ -113,6 +114,7 @@ const ICONS = {
   receive: '<path d="M21 8.5 12 4 3 8.5v7L12 20l9-4.5z"/><path d="M3 8.5 12 13l9-4.5M12 13v7"/>',
   products: '<rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="7" rx="2"/><rect x="3.5" y="13.5" width="7" height="7" rx="2"/><rect x="13.5" y="13.5" width="7" height="7" rx="2"/>',
   reports: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
+  check: '<path d="M12 3 4.5 6v5.5c0 4.6 3.2 8.3 7.5 9.5 4.3-1.2 7.5-4.9 7.5-9.5V6z"/><path d="m8.8 12.2 2.3 2.3 4.3-4.6"/>',
   staff: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><circle cx="17.5" cy="9" r="2.5"/><path d="M16 14.2a5 5 0 0 1 6 4.8"/>',
 };
 const icon = (k) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICONS[k]}</svg>`;
@@ -342,6 +344,8 @@ function modal(title, html, onMount) {
   back.querySelector("input:not([type=hidden])")?.focus();
   return close;
 }
+
+const SCAN_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M7 9v6M10 9v6M13 9v6M16.5 9v6"/></svg>';
 
 // ---------- Фото товара ----------
 const PHOTO_PH = `<span class="ph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9a2 2 0 0 1 2-2h2l1.5-2h7L17 7h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="3.5"/></svg></span>`;
@@ -759,6 +763,77 @@ function productForm(p, barcode = "") {
       catch (err) { toast(err.message, "err"); }
     };
   });
+}
+
+// ---------- ПРОВЕРКА «ЧЕСТНЫЙ ЗНАК» ----------
+const checks = []; // история проверок в этой вкладке
+
+const VERDICT = {
+  ok: ["✓", "ok"], warn: ["!", "warn"], bad: ["✕", "bad"], error: ["?", "unknown"], unknown: ["?", "unknown"],
+};
+
+function renderCheck(main) {
+  main.innerHTML = `
+    <div class="card">
+      <div class="scan">
+        <input id="scan" type="text" autocomplete="off" placeholder="Отсканируйте код маркировки">
+        <button class="btn icon" id="cam" title="Сканировать камерой">${SCAN_ICON}</button>
+      </div>
+      <div class="scan-hint">Сканируйте <b>квадратный код</b> (DataMatrix) на упаковке — так проверяется конкретная единица товара: легальный ли он, не продан ли уже, срок годности. По обычному штрих-коду можно узнать только сведения о товаре.</div>
+    </div>
+    <div id="checks">${checks.map(checkCard).join("") || `<div class="empty">Здесь появятся результаты проверки</div>`}</div>`;
+  const input = $("#scan");
+  input.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); runCheck(input.value); input.value = ""; } };
+  $("#cam").onclick = () => openCamera((code) => runCheck(code));
+  if (matchMedia("(pointer: fine)").matches) input.focus();
+  scanTarget = runCheck;
+  bindCheckCards(main);
+}
+
+function checkCard(c, i) {
+  if (c.loading) return `<div class="card check"><span class="spin"></span> Проверяю в «Честном знаке»…</div>`;
+  const [mark, cls] = VERDICT[c.verdict] || VERDICT.unknown;
+  const rows = [
+    ["Товар", c.name], ["Производитель", c.producer], ["Страна", c.country], ["Группа товаров", c.group],
+    ["Срок годности", c.expire && fmtDate(c.expire)], ["Штрих-код", c.ean],
+  ].filter(([, v]) => v);
+  return `
+    <div class="card check">
+      <div class="verdict ${cls}"><span class="vmark">${mark}</span><div><b>${esc(c.title)}</b>
+        ${c.text ? `<div class="muted">${esc(c.text)}</div>` : ""}</div></div>
+      ${rows.length ? `<table><tbody>${rows.map(([k, v]) => `<tr><td class="muted">${k}</td><td class="num" style="white-space:normal">${esc(v)}</td></tr>`).join("")}</tbody></table>` : ""}
+      ${c.local ? `<button class="btn light" data-open="${c.local.id}" style="margin-top:10px">Есть в вашем магазине: ${esc(c.local.name)}</button>` : ""}
+      ${c.raw ? `<details class="raw"><summary>Подробности (ответ системы)</summary><pre>${esc(JSON.stringify(c.raw, null, 2))}</pre></details>` : ""}
+      <div class="muted" style="margin-top:8px">${esc(c.time)} · ${c.codeType === "ean13" ? "обычный штрих-код" : "код маркировки"}</div>
+    </div>`;
+}
+
+function bindCheckCards(root) {
+  root.querySelectorAll("[data-open]").forEach((b) => (b.onclick = () => {
+    const p = state.products.find((x) => x.id === Number(b.dataset.open));
+    if (p) productCard(p);
+  }));
+}
+
+const fmtDate = (d) => { const t = Date.parse(d); return t ? new Date(t).toLocaleDateString("ru-RU") : d; };
+
+async function runCheck(code) {
+  code = String(code || "").trim();
+  if (!code) return;
+  const entry = { loading: true };
+  checks.unshift(entry);
+  if (checks.length > 20) checks.pop();
+  if (state.view === "check") refreshView();
+  try {
+    const r = await api("GET", "/api/chz/check?code=" + encodeURIComponent(code));
+    Object.assign(entry, r, { loading: false });
+    beep(r.verdict === "ok");
+  } catch (e) {
+    Object.assign(entry, { loading: false, verdict: "error", title: e.message });
+    beep(false);
+  }
+  entry.time = new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  if (state.view === "check") refreshView();
 }
 
 // ---------- ОТЧЁТЫ ----------

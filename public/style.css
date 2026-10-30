@@ -267,3 +267,17 @@ tr.click:active td { background: var(--fill); }
   .hide-d { display: block; }
   .large-title { font-size: 32px; }
 }
+
+/* Проверка «Честный знак» */
+.verdict { display: flex; gap: 12px; align-items: center; padding: 12px; border-radius: 12px; margin-bottom: 10px; }
+.verdict .vmark { width: 36px; height: 36px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-weight: 800; font-size: 18px; color: #fff; flex: none; }
+.verdict.ok { background: var(--green-soft); } .verdict.ok .vmark { background: var(--green); }
+.verdict.warn { background: var(--warn-soft); } .verdict.warn .vmark { background: var(--warn); }
+.verdict.bad { background: var(--danger-soft); } .verdict.bad .vmark { background: var(--danger); }
+.verdict.unknown { background: var(--fill); } .verdict.unknown .vmark { background: #8e8e93; }
+.raw { margin-top: 10px; font-size: 13px; }
+.raw summary { color: var(--accent); cursor: pointer; }
+.raw pre { white-space: pre-wrap; word-break: break-all; background: var(--fill); padding: 10px; border-radius: 10px; max-height: 260px; overflow: auto; font-size: 12px; }
+.tabbar button span { white-space: nowrap; }
+.check .btn { white-space: normal; text-align: left; width: 100%; justify-content: flex-start; }
+.check td.muted { white-space: nowrap; width: 1%; padding-right: 14px; }
