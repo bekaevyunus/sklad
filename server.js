@@ -558,4 +558,14 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => console.log(`Склад запущен: http://localhost:${PORT}`));
+server.listen(PORT, () => {
+  console.log(`Склад запущен.`);
+  console.log(`  На этом компьютере:  http://localhost:${PORT}`);
+  // Адреса в локальной сети — по ним заходят с телефонов в том же Wi-Fi
+  for (const list of Object.values(require("node:os").networkInterfaces())) {
+    for (const a of list || []) {
+      if (a.family === "IPv4" && !a.internal) console.log(`  С телефона (Wi-Fi):  http://${a.address}:${PORT}`);
+    }
+  }
+  console.log(`Не закрывайте это окно, пока работаете с приложением.`);
+});
