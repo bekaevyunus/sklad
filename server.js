@@ -723,10 +723,14 @@ function serveStatic(req, res, pathname) {
     if (path.extname(pathname)) return send(res, 404, { error: "Не найдено" });
     file = path.join(PUBLIC_DIR, "index.html");
   }
-  res.writeHead(200, {
-    "Content-Type": TYPES[path.extname(file)] || "application/octet-stream",
-    "Cache-Control": file.endsWith("index.html") || file.endsWith("sw.js") ? "no-cache" : "public, max-age=3600",
-  });
+  // Браузер каждый раз сверяется с сервером: после обновления приложения сразу видно новое оформление,
+  // а если файл не менялся — сервер отвечает коротким «304 Не изменилось»
+  const mtime = fs.statSync(file).mtime;
+  mtime.setMilliseconds(0);
+  const since = Date.parse(req.headers["if-modified-since"] || "");
+  const headers = { "Cache-Control": "no-cache", "Last-Modified": mtime.toUTCString() };
+  if (since && since >= mtime.getTime()) { res.writeHead(304, headers); return res.end(); }
+  res.writeHead(200, { ...headers, "Content-Type": TYPES[path.extname(file)] || "application/octet-stream" });
   fs.createReadStream(file).pipe(res);
 }
 
