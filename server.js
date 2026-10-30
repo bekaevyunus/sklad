@@ -63,6 +63,11 @@ CREATE TABLE IF NOT EXISTS movements (
 );
 CREATE INDEX IF NOT EXISTS idx_mov_created ON movements(created);
 CREATE INDEX IF NOT EXISTS idx_sales_created ON sales(created);
+CREATE TABLE IF NOT EXISTS lookup_cache (
+  code TEXT PRIMARY KEY,
+  data TEXT,
+  created TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 INSERT OR IGNORE INTO meta (key, value) VALUES ('version', '1');
 `);
@@ -400,6 +405,76 @@ route("GET", "/api/export.csv", async (req, res) => {
     "Content-Type": "text/csv; charset=utf-8",
     "Content-Disposition": `attachment; filename="ostatki-${new Date().toISOString().slice(0, 10)}.csv"`,
   });
+}, { auth: "admin" });
+
+// ---------- Поиск названия товара по штрих-коду в открытых базах ----------
+const UA = "Sklad/1.0 (inventory app; https://github.com/bekaevyunus/sklad)";
+
+async function getJson(url) {
+  const res = await fetch(url, { headers: { "User-Agent": UA, Accept: "application/json" }, signal: AbortSignal.timeout(6000) });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+// Семейство баз Open Facts: продукты, косметика и бытовая химия, прочие товары, корм для животных
+const OPEN_FACTS = [
+  ["Open Food Facts", "world.openfoodfacts.org"],
+  ["Open Beauty Facts", "world.openbeautyfacts.org"],
+  ["Open Products Facts", "world.openproductsfacts.org"],
+  ["Open Pet Food Facts", "world.openpetfoodfacts.org"],
+];
+
+async function fromOpenFacts([source, host], code) {
+  const fields = "product_name_ru,product_name,generic_name_ru,brands,quantity,image_front_small_url";
+  const d = await getJson(`https://${host}/api/v2/product/${code}.json?fields=${fields}&lc=ru`);
+  if (!d || d.status !== 1 || !d.product) return null;
+  const p = d.product;
+  const name = str(p.product_name_ru || p.product_name || p.generic_name_ru);
+  if (!name) return null;
+  return { name, brand: str(p.brands).split(",")[0].trim(), quantity: str(p.quantity), image: p.image_front_small_url || "", source };
+}
+
+async function fromUpcItemDb(code) {
+  // Бесплатный пробный доступ: до 100 запросов в день с одного адреса
+  const d = await getJson(`https://api.upcitemdb.com/prod/trial/lookup?upc=${code}`);
+  const it = d?.items?.[0];
+  if (!it?.title) return null;
+  return { name: str(it.title), brand: str(it.brand), quantity: "", image: it.images?.[0] || "", source: "UPCitemdb" };
+}
+
+// Собираем понятное название: «Бренд Название, объём»
+function fullName(r) {
+  let name = r.name;
+  if (r.brand && !name.toLowerCase().includes(r.brand.toLowerCase())) name = `${r.brand} ${name}`;
+  if (r.quantity && !name.toLowerCase().includes(r.quantity.toLowerCase())) name += `, ${r.quantity}`;
+  return name.replace(/\s+/g, " ").trim();
+}
+
+async function lookupBarcode(code) {
+  const cached = db.prepare("SELECT data, created FROM lookup_cache WHERE code = ?").get(code);
+  // «Не найдено» кэшируем на 7 дней (вдруг товар добавят в базу), найденное — навсегда
+  if (cached && (cached.data || Date.now() - Date.parse(cached.created + "Z") < 7 * 86400000)) {
+    return cached.data ? JSON.parse(cached.data) : null;
+  }
+  const tries = [...OPEN_FACTS.map((s) => () => fromOpenFacts(s, code)), () => fromUpcItemDb(code)];
+  // Опрашиваем все базы одновременно, берём ответ самой приоритетной
+  const results = await Promise.all(tries.map((t) => t().catch(() => "error")));
+  const found = results.find((r) => r && r !== "error") || null;
+  const out = found && { ...found, full_name: fullName(found) };
+  // Если ни одна база не ответила (нет интернета) — не кэшируем
+  const anyAnswered = results.some((r) => r !== "error");
+  if (out || anyAnswered) {
+    db.prepare("INSERT OR REPLACE INTO lookup_cache (code, data) VALUES (?, ?)").run(code, out ? JSON.stringify(out) : null);
+  }
+  return out;
+}
+
+route("GET", "/api/lookup/:code", async (req, res, { params }) => {
+  const code = decodeURIComponent(params.code).replace(/\s/g, "");
+  if (!/^\d{8,14}$/.test(code)) throw bad("Искать можно только обычные штрих-коды (8–14 цифр)");
+  const r = await lookupBarcode(code);
+  if (!r) throw new HttpError(404, "Товар не найден в открытых базах");
+  send(res, 200, r);
 }, { auth: "admin" });
 
 // Сотрудники

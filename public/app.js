@@ -501,8 +501,10 @@ function productForm(p, barcode = "") {
       <label>Название<input name="name" type="text" value="${esc(p?.name || "")}" required></label>
       <label>Штрих-код
         <div class="scan"><input name="barcode" type="text" value="${esc(p?.barcode ?? barcode)}" placeholder="Можно оставить пустым">
-        <button type="button" class="btn icon light" id="pf-cam">📷</button></div>
+        <button type="button" class="btn icon light" id="pf-cam" title="Сканировать камерой">📷</button>
+        <button type="button" class="btn icon light" id="pf-find" title="Найти название по штрих-коду">🔍</button></div>
       </label>
+      <div id="pf-found" class="found" hidden></div>
       <div class="row">
         <label>${isNew ? "Количество" : "Остаток"}<input name="qty" type="text" inputmode="decimal" value="${p ? p.qty : 0}"></label>
         <label>Закупочная цена<input name="buy_price" type="text" inputmode="decimal" value="${p?.buy_price ?? ""}" placeholder="0"></label>
@@ -523,7 +525,33 @@ function productForm(p, barcode = "") {
     };
     f.buy_price.oninput = f.sell_price.oninput = showMargin;
     showMargin();
-    $("#pf-cam", root).onclick = () => openCamera((code) => { f.barcode.value = code; beep(); });
+    // Поиск названия в открытых базах штрих-кодов
+    const info = $("#pf-found", root);
+    const findName = async (auto) => {
+      const code = f.barcode.value.trim();
+      if (!/^\d{8,14}$/.test(code)) { if (!auto) toast("Сначала укажите штрих-код (8–14 цифр)", "err"); return; }
+      info.hidden = false;
+      info.innerHTML = `<span class="spin"></span> Ищу название по штрих-коду…`;
+      try {
+        const r = await api("GET", "/api/lookup/" + code);
+        if (!f.isConnected) return;
+        const typed = f.name.value.trim();
+        if (!typed || !auto) f.name.value = r.full_name;
+        info.innerHTML = `
+          ${r.image ? `<img src="${esc(r.image)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ""}
+          <div><b>Найдено:</b> ${esc(r.full_name)}<div class="muted">Источник: ${esc(r.source)}. Проверьте и при необходимости исправьте название.</div>
+          ${typed && auto ? `<button type="button" class="btn light" id="pf-use">Взять это название</button>` : ""}</div>`;
+        const use = $("#pf-use", root);
+        if (use) use.onclick = () => { f.name.value = r.full_name; use.remove(); };
+        if (auto) setTimeout(() => { const el = f.name.value === r.full_name ? f.qty : f.name; el.focus(); el.select(); }, 0);
+      } catch (e) {
+        if (!f.isConnected) return;
+        info.innerHTML = `<div class="muted">${esc(e.message)}. Введите название вручную.</div>`;
+      }
+    };
+    $("#pf-find", root).onclick = () => findName(false);
+    $("#pf-cam", root).onclick = () => openCamera((code) => { f.barcode.value = code; beep(); if (isNew) findName(true); });
+    if (isNew && barcode) findName(true);
     f.onsubmit = async (e) => {
       e.preventDefault();
       const body = {

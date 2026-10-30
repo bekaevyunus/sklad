@@ -144,3 +144,9 @@ tr.click:hover td { background: #fafcfb; }
   .cart-line { grid-template-columns: 1fr auto; }
   .cart-line .sum { text-align: right; }
 }
+
+.found { display: flex; gap: 12px; align-items: flex-start; background: var(--accent-soft); border-radius: 10px; padding: 10px 12px; }
+.found img { width: 56px; height: 56px; object-fit: contain; background: #fff; border-radius: 8px; flex: none; }
+.found .btn { margin-top: 6px; padding: 6px 12px; }
+.spin { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
+@keyframes spin { to { transform: rotate(360deg); } }
