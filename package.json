@@ -1,0 +1,12 @@
+{
+  "name": "sklad",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Учёт товаров: приход, продажи по штрих-коду, остатки и отчёты. Компьютер и телефон синхронно.",
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server.js"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  }
+}
