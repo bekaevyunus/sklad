@@ -7,6 +7,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { DatabaseSync } = require("node:sqlite");
+const { guessCategory, CATEGORIES } = require("./public/categories.js");
 
 const PORT = Number(process.env.PORT || 3000);
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
@@ -14,7 +15,8 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const ADMIN_NAME = process.env.ADMIN_NAME || "admin";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
 
-fs.mkdirSync(DATA_DIR, { recursive: true });
+const IMAGES_DIR = path.join(DATA_DIR, "images");
+fs.mkdirSync(IMAGES_DIR, { recursive: true });
 const db = new DatabaseSync(path.join(DATA_DIR, "sklad.db"));
 db.exec(`
 PRAGMA journal_mode = WAL;
@@ -73,6 +75,19 @@ INSERT OR IGNORE INTO meta (key, value) VALUES ('version', '1');
 DELETE FROM lookup_cache WHERE data IS NULL;
 `);
 
+// Новые поля у товаров (для баз, созданных старой версией)
+{
+  const cols = db.prepare("PRAGMA table_info(products)").all().map((c) => c.name);
+  if (!cols.includes("category")) db.exec("ALTER TABLE products ADD COLUMN category TEXT NOT NULL DEFAULT ''");
+  if (!cols.includes("image")) db.exec("ALTER TABLE products ADD COLUMN image TEXT NOT NULL DEFAULT ''");
+  // Товарам без категории подбираем её автоматически (при каждом запуске — правила со временем улучшаются)
+  const upd = db.prepare("UPDATE products SET category = ? WHERE id = ?");
+  for (const p of db.prepare("SELECT id, name FROM products WHERE category = ''").all()) {
+    const c = guessCategory(p.name);
+    if (c) upd.run(c, p.id);
+  }
+}
+
 // ---------- Пароли и сессии ----------
 function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
   return { salt, hash: crypto.scryptSync(password, salt, 64).toString("hex") };
@@ -128,12 +143,12 @@ function send(res, status, body, headers = {}) {
   res.end(data);
 }
 
-async function readJson(req) {
+async function readJson(req, limit = 1_000_000) {
   let size = 0;
   const chunks = [];
   for await (const c of req) {
     size += c.length;
-    if (size > 1_000_000) throw bad("Слишком большой запрос");
+    if (size > limit) throw bad("Слишком большой запрос (фото больше 3 МБ?)");
     chunks.push(c);
   }
   if (!chunks.length) return {};
@@ -232,16 +247,60 @@ function saveProduct(body, id) {
     const other = db.prepare("SELECT id, name FROM products WHERE barcode = ?").get(barcode);
     if (other && other.id !== id) throw bad(`Штрих-код уже занят товаром «${other.name}»`);
   }
-  return { name, barcode, buy, sell };
+  // Категорию берём из формы, а если её нет — определяем по названию
+  const category = str(body.category).slice(0, 60) || guessCategory(name, body.category_hint) || "";
+  return { name, barcode, buy, sell, category };
 }
 
+// ---------- Фото товаров ----------
+const IMG_TYPES = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" };
+const MAX_IMG = 3 * 1024 * 1024;
+
+function removeImageFiles(id) {
+  for (const ext of Object.values(IMG_TYPES)) fs.rmSync(path.join(IMAGES_DIR, `${id}.${ext}`), { force: true });
+}
+
+// Сохраняет фото: из data:-ссылки (снято на телефон) или скачивает по адресу (из базы штрих-кодов)
+async function saveImage(id, { data, url }) {
+  let buf, ext;
+  if (data) {
+    const m = String(data).match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/);
+    if (!m) throw bad("Неподдерживаемый формат фото");
+    buf = Buffer.from(m[2], "base64");
+    ext = IMG_TYPES[m[1]];
+  } else if (url && /^https?:\/\//.test(url)) {
+    const res = await fetch(url, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(8000) });
+    const type = (res.headers.get("content-type") || "").split(";")[0].trim();
+    if (!res.ok || !IMG_TYPES[type]) return false;
+    buf = Buffer.from(await res.arrayBuffer());
+    ext = IMG_TYPES[type];
+  } else return false;
+  if (!buf.length || buf.length > MAX_IMG) throw bad("Фото слишком большое (больше 3 МБ)");
+  removeImageFiles(id);
+  fs.writeFileSync(path.join(IMAGES_DIR, `${id}.${ext}`), buf);
+  db.prepare("UPDATE products SET image = ?, updated = datetime('now') WHERE id = ?").run(`${id}.${ext}?v=${Date.now()}`, id);
+  bump();
+  return true;
+}
+
+// Фото из формы: ошибка скачивания картинки из интернета не должна мешать сохранению товара
+async function applyImage(id, body) {
+  try {
+    if (body.image_data) await saveImage(id, { data: body.image_data });
+    else if (body.image_url) await saveImage(id, { url: body.image_url });
+  } catch (e) {
+    if (body.image_data) throw e;
+  }
+}
+
+// Новый товар может добавить любой сотрудник (по штрих-коду или вручную)
 route("POST", "/api/products", async (req, res, { user }) => {
-  const body = await readJson(req);
+  const body = await readJson(req, 5_000_000);
   const p = saveProduct(body);
   const qty = num(body.qty ?? 0, "Количество", { min: 0 });
   const id = tx(() => {
-    const r = db.prepare("INSERT INTO products (barcode, name, qty, buy_price, sell_price) VALUES (?,?,?,?,?)")
-      .run(p.barcode, p.name, qty, p.buy, p.sell);
+    const r = db.prepare("INSERT INTO products (barcode, name, qty, buy_price, sell_price, category) VALUES (?,?,?,?,?,?)")
+      .run(p.barcode, p.name, qty, p.buy, p.sell, p.category);
     const pid = Number(r.lastInsertRowid);
     if (qty > 0) {
       db.prepare("INSERT INTO movements (type, product_id, product_name, qty, buy_price, user_id) VALUES ('in',?,?,?,?,?)")
@@ -250,30 +309,55 @@ route("POST", "/api/products", async (req, res, { user }) => {
     bump();
     return pid;
   });
-  send(res, 201, db.prepare("SELECT * FROM products WHERE id = ?").get(id));
-}, { auth: "admin" });
+  await applyImage(id, body);
+  send(res, 201, productView(db.prepare("SELECT * FROM products WHERE id = ?").get(id), user));
+});
 
 route("PUT", "/api/products/:id", async (req, res, { user, params }) => {
   const id = Number(params.id);
   const old = db.prepare("SELECT * FROM products WHERE id = ?").get(id);
   if (!old) throw new HttpError(404, "Товар не найден");
-  const body = await readJson(req);
+  const body = await readJson(req, 5_000_000);
   const p = saveProduct({ ...old, ...body }, id);
   const qty = body.qty !== undefined ? num(body.qty, "Количество") : old.qty;
   tx(() => {
-    db.prepare("UPDATE products SET barcode=?, name=?, buy_price=?, sell_price=?, qty=?, updated=datetime('now') WHERE id=?")
-      .run(p.barcode, p.name, p.buy, p.sell, qty, id);
+    db.prepare("UPDATE products SET barcode=?, name=?, buy_price=?, sell_price=?, qty=?, category=?, updated=datetime('now') WHERE id=?")
+      .run(p.barcode, p.name, p.buy, p.sell, qty, p.category, id);
     if (qty !== old.qty) {
       db.prepare("INSERT INTO movements (type, product_id, product_name, qty, buy_price, user_id) VALUES ('adjust',?,?,?,?,?)")
         .run(id, p.name, Math.round((qty - old.qty) * 1000) / 1000, p.buy, user.id);
     }
     bump();
   });
+  await applyImage(id, body);
   send(res, 200, db.prepare("SELECT * FROM products WHERE id = ?").get(id));
 }, { auth: "admin" });
 
+// Фото к товару может добавить любой сотрудник, удалить — только владелец
+route("POST", "/api/products/:id/image", async (req, res, { user, params }) => {
+  const id = Number(params.id);
+  if (!db.prepare("SELECT 1 FROM products WHERE id = ?").get(id)) throw new HttpError(404, "Товар не найден");
+  const body = await readJson(req, 5_000_000);
+  await saveImage(id, { data: body.image_data });
+  send(res, 200, productView(db.prepare("SELECT * FROM products WHERE id = ?").get(id), user));
+});
+
+route("DELETE", "/api/products/:id/image", async (req, res, { params }) => {
+  const id = Number(params.id);
+  removeImageFiles(id);
+  db.prepare("UPDATE products SET image = '' WHERE id = ?").run(id);
+  bump();
+  send(res, 200, { ok: true });
+}, { auth: "admin" });
+
+route("GET", "/api/categories", async (req, res) => {
+  const used = db.prepare("SELECT DISTINCT category FROM products WHERE category != ''").all().map((r) => r.category);
+  send(res, 200, [...new Set([...CATEGORIES, ...used])]);
+});
+
 route("DELETE", "/api/products/:id", async (req, res, { params }) => {
   tx(() => { db.prepare("DELETE FROM products WHERE id = ?").run(Number(params.id)); bump(); });
+  removeImageFiles(Number(params.id));
   send(res, 200, { ok: true });
 }, { auth: "admin" });
 
@@ -382,8 +466,13 @@ route("GET", "/api/report", async (req, res, { query }) => {
   const stock = db.prepare(`
     SELECT COUNT(*) AS items, COALESCE(SUM(qty*buy_price),0) AS buy_value, COALESCE(SUM(qty*sell_price),0) AS sell_value
     FROM products WHERE qty > 0`).get();
+  const cats = db.prepare(`
+    SELECT COALESCE(NULLIF(p.category, ''), 'Прочее') AS name, SUM(m.qty*m.price) AS revenue, SUM(m.qty*(m.price-m.buy_price)) AS profit
+    FROM movements m LEFT JOIN products p ON p.id = m.product_id
+    WHERE m.type='sale' AND date(m.created, ?) BETWEEN ? AND ?
+    GROUP BY 1 ORDER BY revenue DESC`).all(shift, from, to);
   const low = db.prepare("SELECT id, name, qty FROM products WHERE qty <= 2 ORDER BY qty, name LIMIT 50").all();
-  send(res, 200, { from, to, ...sum, profit: sum.revenue - sum.cost, top, stock, low });
+  send(res, 200, { from, to, ...sum, profit: sum.revenue - sum.cost, top, stock, low, cats });
 }, { auth: "admin" });
 
 route("GET", "/api/movements", async (req, res, { query }) => {
@@ -396,11 +485,11 @@ route("GET", "/api/movements", async (req, res, { query }) => {
 
 // Выгрузка остатков в Excel (CSV с ; — открывается двойным щелчком)
 route("GET", "/api/export.csv", async (req, res) => {
-  const rows = db.prepare("SELECT barcode, name, qty, buy_price, sell_price FROM products ORDER BY name COLLATE NOCASE").all();
+  const rows = db.prepare("SELECT barcode, name, category, qty, buy_price, sell_price FROM products ORDER BY category, name COLLATE NOCASE").all();
   const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const fmt = (n) => String(n).replace(".", ",");
-  const csv = "﻿" + ["Штрих-код;Название;Количество;Закупочная цена;Розничная цена"]
-    .concat(rows.map((r) => [esc(r.barcode), esc(r.name), fmt(r.qty), fmt(r.buy_price), fmt(r.sell_price)].join(";")))
+  const csv = "﻿" + ["Штрих-код;Название;Категория;Количество;Закупочная цена;Розничная цена"]
+    .concat(rows.map((r) => [esc(r.barcode), esc(r.name), esc(r.category || "Прочее"), fmt(r.qty), fmt(r.buy_price), fmt(r.sell_price)].join(";")))
     .join("\r\n");
   send(res, 200, csv, {
     "Content-Type": "text/csv; charset=utf-8",
@@ -425,14 +514,33 @@ const OPEN_FACTS = [
   ["Open Pet Food Facts", "world.openpetfoodfacts.org"],
 ];
 
+// Категория по данным Open Facts — пригодится, если по названию определить не удалось
+function offHint(host, tags = []) {
+  if (host.includes("beauty")) return "Косметика и гигиена";
+  if (host.includes("petfood")) return "Корм для животных";
+  const t = (tags || []).join(" ");
+  const map = [
+    ["beverages|waters|juices|sodas|teas|coffees", "Напитки"], ["dairies|milks|cheeses|yogurts", "Молочные продукты"],
+    ["chocolates|candies|biscuits|confectioneries|sweet-snacks", "Сладости"], ["salty-snacks|chips|nuts", "Снеки"],
+    ["breads|pastries", "Хлеб и выпечка"], ["meats|sausages|fishes|seafood", "Мясо, рыба, колбасы"],
+    ["canned", "Консервы"], ["cereals|pastas|flours|sugars|condiments|sauces|oils", "Бакалея"],
+    ["fruits|vegetables", "Овощи и фрукты"], ["frozen", "Замороженные продукты"], ["baby", "Детские товары"],
+  ];
+  for (const [re, cat] of map) if (new RegExp(re).test(t)) return cat;
+  return "";
+}
+
 async function fromOpenFacts([source, host], code) {
-  const fields = "product_name_ru,product_name,generic_name_ru,brands,quantity,image_front_small_url";
+  const fields = "product_name_ru,product_name,generic_name_ru,brands,quantity,image_front_url,image_front_small_url,categories_tags";
   const d = await getJson(`https://${host}/api/v2/product/${code}.json?fields=${fields}&lc=ru`);
   if (!d || d.status !== 1 || !d.product) return null;
   const p = d.product;
   const name = str(p.product_name_ru || p.product_name || p.generic_name_ru);
   if (!name) return null;
-  return { name, brand: str(p.brands).split(",")[0].trim(), quantity: str(p.quantity), image: p.image_front_small_url || "", source };
+  return {
+    name, brand: str(p.brands).split(",")[0].trim(), quantity: str(p.quantity),
+    image: p.image_front_url || p.image_front_small_url || "", source, hint: offHint(host, p.categories_tags),
+  };
 }
 
 async function fromUpcItemDb(code) {
@@ -551,8 +659,8 @@ route("GET", "/api/lookup/:code", async (req, res, { params }) => {
   if (!/^\d{8,14}$/.test(code)) throw bad("Искать можно только обычные штрих-коды (8–14 цифр)");
   const r = await lookupBarcode(code);
   if (!r) throw new HttpError(404, "Товар не найден в открытых базах");
-  send(res, 200, r);
-}, { auth: "admin" });
+  send(res, 200, { ...r, category: guessCategory(r.full_name, r.hint) });
+});
 
 // Сотрудники
 route("GET", "/api/users", async (req, res) => {
@@ -599,6 +707,15 @@ const TYPES = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
   ".json": "application/json", ".webmanifest": "application/manifest+json", ".svg": "image/svg+xml", ".png": "image/png",
 };
+function serveImage(res, name) {
+  if (!/^\d+\.(jpg|png|webp)$/.test(name)) return send(res, 404, { error: "Не найдено" });
+  const file = path.join(IMAGES_DIR, name);
+  if (!fs.existsSync(file)) return send(res, 404, { error: "Не найдено" });
+  const ext = name.split(".").pop();
+  res.writeHead(200, { "Content-Type": ext === "jpg" ? "image/jpeg" : `image/${ext}`, "Cache-Control": "public, max-age=31536000, immutable" });
+  fs.createReadStream(file).pipe(res);
+}
+
 function serveStatic(req, res, pathname) {
   let file = path.normalize(path.join(PUBLIC_DIR, pathname === "/" ? "index.html" : pathname));
   if (!file.startsWith(PUBLIC_DIR)) return send(res, 403, { error: "Нет доступа" });
@@ -617,6 +734,7 @@ function serveStatic(req, res, pathname) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost");
   try {
+    if (url.pathname.startsWith("/images/")) return serveImage(res, url.pathname.slice(8));
     if (!url.pathname.startsWith("/api/")) return serveStatic(req, res, url.pathname);
     for (const r of routes) {
       if (r.method !== req.method) continue;

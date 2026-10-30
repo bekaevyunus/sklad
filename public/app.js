@@ -16,6 +16,7 @@ const state = {
   version: 0,
   online: true,
   products: [],     // кэш для поиска по названию
+  categories: [],   // список категорий для подсказок
   cart: [],         // [{ product, qty }]
   received: null,   // товар, найденный на экране прихода
   newBarcode: null, // штрих-код, которого нет в базе
@@ -61,6 +62,9 @@ function beep(ok = true) {
 
 async function loadProducts() {
   state.products = await api("GET", "/api/products");
+}
+async function loadCategories() {
+  state.categories = await api("GET", "/api/categories").catch(() => state.categories);
 }
 
 // ---------- Синхронизация между устройствами ----------
@@ -322,6 +326,93 @@ function modal(title, html, onMount) {
   return close;
 }
 
+// ---------- Фото товара ----------
+const imgSrc = (p) => (p && p.image ? "/images/" + p.image : "");
+const thumb = (p, size = 40) => p && p.image
+  ? `<img class="thumb" style="width:${size}px;height:${size}px" src="${esc(imgSrc(p))}" alt="" loading="lazy">`
+  : `<span class="thumb none" style="width:${size}px;height:${size}px">${esc(catIcon(p?.category))}</span>`;
+
+const CAT_ICONS = {
+  "Напитки": "🥤", "Масла и антифризы": "🛢", "Автотовары": "🚗", "Табак": "🚬", "Корм для животных": "🐾",
+  "Детские товары": "🍼", "Косметика и гигиена": "🧴", "Бытовая химия": "🧽", "Хозтовары": "🧰", "Молочные продукты": "🥛",
+  "Мясо, рыба, колбасы": "🥩", "Консервы": "🥫", "Хлеб и выпечка": "🍞", "Сладости": "🍫", "Снеки": "🥜", "Бакалея": "🌾",
+  "Овощи и фрукты": "🍎", "Яйца": "🥚", "Замороженные продукты": "🧊", "Канцтовары": "✏️", "Электроника и связь": "🔌",
+};
+const catIcon = (c) => CAT_ICONS[c] || "📦";
+const catName = (c) => c || "Прочее";
+
+// Фото с телефона уменьшаем до 900 px — быстро грузится и не занимает место
+function pickPhoto() {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/*";
+    input.setAttribute("capture", "environment");
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return resolve(null);
+      try { resolve(await resizeImage(file, 900)); }
+      catch { toast("Не удалось прочитать фото", "err"); resolve(null); }
+    };
+    input.click();
+  });
+}
+
+async function resizeImage(file, max) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((ok, fail) => { const i = new Image(); i.onload = () => ok(i); i.onerror = fail; i.src = url; });
+    const k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = document.createElement("canvas");
+    c.width = Math.round(img.naturalWidth * k);
+    c.height = Math.round(img.naturalHeight * k);
+    const ctx = c.getContext("2d");
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.drawImage(img, 0, 0, c.width, c.height);
+    return c.toDataURL("image/jpeg", 0.82);
+  } finally { URL.revokeObjectURL(url); }
+}
+
+// ---------- Карточка товара (окно с фото) ----------
+function productCard(p) {
+  const isAdmin = state.user.role === "admin";
+  modal(p.name, `
+    <div class="pcard">
+      <div class="pcard-img">${p.image ? `<img src="${esc(imgSrc(p))}" alt="">` : `<span>${esc(catIcon(p.category))}</span><div class="muted">Фото нет</div>`}</div>
+      <div class="pcard-info">
+        <span class="badge">${esc(catIcon(p.category))} ${esc(catName(p.category))}</span>
+        <div class="pcard-price">${money(p.sell_price)}</div>
+        <table><tbody>
+          <tr><td class="muted">На складе</td><td class="num ${p.qty <= 2 ? "low" : ""}"><b>${qtyFmt(p.qty)}</b></td></tr>
+          ${isAdmin ? `<tr><td class="muted">Закупочная цена</td><td class="num">${money(p.buy_price)}</td></tr>
+          <tr><td class="muted">Наценка</td><td class="num">${p.buy_price > 0 ? Math.round(((p.sell_price - p.buy_price) / p.buy_price) * 100) + "%" : "—"}</td></tr>` : ""}
+          <tr><td class="muted">Штрих-код</td><td class="num">${esc(p.barcode || "—")}</td></tr>
+        </tbody></table>
+      </div>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <button class="btn light" id="pc-photo">📷 ${p.image ? "Заменить фото" : "Добавить фото"}</button>
+      <button class="btn light" id="pc-cart">🛒 В корзину</button>
+      ${isAdmin ? `<button class="btn" id="pc-edit">✏️ Изменить</button>` : ""}
+    </div>`, (root, close) => {
+    $("#pc-photo", root).onclick = async () => {
+      const data = await pickPhoto();
+      if (!data) return;
+      try {
+        await api("POST", `/api/products/${p.id}/image`, { image_data: data });
+        toast("Фото сохранено", "ok");
+        await loadProducts();
+        root.remove();
+        productCard(state.products.find((x) => x.id === p.id) || p);
+      } catch (e) { toast(e.message, "err"); }
+    };
+    $("#pc-cart", root).onclick = () => { close(); state.view = "sale"; render(); addToCart(p); };
+    const edit = $("#pc-edit", root);
+    if (edit) edit.onclick = () => { root.remove(); productForm(p); };
+  });
+}
+
 // ---------- ПРОДАЖА ----------
 function renderSale(main) {
   const total = state.cart.reduce((s, l) => s + l.qty * l.product.sell_price, 0);
@@ -332,8 +423,9 @@ function renderSale(main) {
       <div id="cart">
         ${state.cart.length ? state.cart.map((l, i) => `
           <div class="cart-line">
-            <div><div class="name">${esc(l.product.name)}</div>
-              <div class="muted">${money(l.product.sell_price)} · на складе ${qtyFmt(l.product.qty)}</div></div>
+            <div class="with-thumb" data-card="${l.product.id}">${thumb(l.product, 44)}
+              <div><div class="name">${esc(l.product.name)}</div>
+              <div class="muted">${money(l.product.sell_price)} · на складе ${qtyFmt(l.product.qty)}</div></div></div>
             <div class="qty">
               <button data-dec="${i}">−</button>
               <input data-q="${i}" type="text" inputmode="decimal" value="${qtyFmt(l.qty)}">
@@ -352,11 +444,13 @@ function renderSale(main) {
     <div class="card"><h2>${state.user.role === "admin" ? "Продажи за сегодня" : "Мои продажи за сегодня"}</h2><div id="today">…</div></div>`;
 
   bindScan(addToCart, (code) => {
-    if (state.user.role === "admin") {
-      if (confirm(`Товара со штрих-кодом ${code} нет в базе. Добавить его?`)) productForm(null, code);
-    } else toast(`Товар ${code} не найден. Попросите владельца добавить его.`, "err");
+    if (confirm(`Товара со штрих-кодом ${code} нет в базе. Добавить его?`)) productForm(null, code);
   });
 
+  main.querySelectorAll("[data-card]").forEach((el) => (el.onclick = () => {
+    const p = state.products.find((x) => x.id === Number(el.dataset.card));
+    if (p) productCard(p);
+  }));
   main.querySelectorAll("[data-inc]").forEach((b) => (b.onclick = () => { state.cart[b.dataset.inc].qty += 1; refreshView(); }));
   main.querySelectorAll("[data-dec]").forEach((b) => (b.onclick = () => {
     const l = state.cart[b.dataset.dec];
@@ -421,7 +515,9 @@ function renderReceive(main) {
     <div class="card">${scanBox("Штрих-код или название поступившего товара")}</div>
     ${p ? `
     <form class="card form" id="recv">
-      <h2>${esc(p.name)}</h2>
+      <div class="with-thumb" id="recv-card">${thumb(p, 64)}
+        <div><h2 style="margin:0">${esc(p.name)}</h2>
+        <div class="muted">${esc(catIcon(p.category))} ${esc(catName(p.category))}</div></div></div>
       <div class="muted">Сейчас на складе: <b>${qtyFmt(p.qty)}</b> · розничная ${money(p.sell_price)}${isAdmin ? ` · закупочная ${money(p.buy_price)}` : ""}</div>
       <div class="row">
         <label>Пришло, шт<input name="qty" type="text" inputmode="decimal" value="1" required></label>
@@ -433,15 +529,14 @@ function renderReceive(main) {
         <button class="btn big">Оприходовать</button>
         <button type="button" class="btn ghost" id="recv-cancel">Отмена</button>
       </div>
-    </form>` : `<div class="card empty">Отсканируйте поступивший товар. Если его ещё нет в базе${isAdmin ? ", появится форма добавления" : " — попросите владельца добавить его"}.</div>`}
-    ${isAdmin ? `<button class="btn light" id="new-prod">+ Новый товар без штрих-кода</button>` : ""}`;
+    </form>` : `<div class="card empty">Отсканируйте поступивший товар. Если его ещё нет в базе, появится форма добавления — название подтянется само.</div>`}
+    <button class="btn light" id="new-prod">+ Новый товар вручную</button>`;
 
-  bindScan((prod) => { state.received = prod; refreshView(); setTimeout(() => $("#recv [name=qty]")?.select(), 0); }, (code) => {
-    if (isAdmin) productForm(null, code);
-    else toast(`Товар ${code} не найден. Попросите владельца добавить его.`, "err");
-  });
-  $("#new-prod") && ($("#new-prod").onclick = () => productForm(null, ""));
+  bindScan((prod) => { state.received = prod; refreshView(); setTimeout(() => $("#recv [name=qty]")?.select(), 0); },
+    (code) => productForm(null, code));
+  $("#new-prod").onclick = () => productForm(null, "");
   if (!p) return;
+  $("#recv-card").onclick = () => productCard(p);
   $("#recv-cancel").onclick = () => { state.received = null; refreshView(); };
   $("#recv").onsubmit = async (e) => {
     e.preventDefault();
@@ -460,120 +555,184 @@ function renderReceive(main) {
 
 // ---------- ТОВАРЫ ----------
 let productQuery = "";
+let productCat = "";
 function renderProducts(main) {
   const isAdmin = state.user.role === "admin";
-  const list = productQuery
-    ? state.products.filter((p) => p.name.toLowerCase().includes(productQuery.toLowerCase()) || (p.barcode || "").includes(productQuery))
-    : state.products;
+  const q = productQuery.toLowerCase();
+  const found = state.products.filter((p) => !q || p.name.toLowerCase().includes(q) || (p.barcode || "").includes(productQuery));
+  const counts = {};
+  for (const p of found) counts[catName(p.category)] = (counts[catName(p.category)] || 0) + 1;
+  const list = productCat ? found.filter((p) => catName(p.category) === productCat) : found;
+  // Группируем по категориям
+  const groups = {};
+  for (const p of list) (groups[catName(p.category)] ||= []).push(p);
+  const order = Object.keys(groups).sort((a, b) => (a === "Прочее") - (b === "Прочее") || a.localeCompare(b, "ru"));
   const totalQty = list.reduce((s, p) => s + Math.max(0, p.qty), 0);
+
   main.innerHTML = `
     <div class="toolbar">
       <input type="search" id="pq" placeholder="Поиск по названию или штрих-коду" value="${esc(productQuery)}">
-      ${isAdmin ? `<button class="btn" id="add">+ Товар</button>
-      <a class="btn ghost" href="/api/export.csv" download>⬇ Excel</a>` : ""}
+      <button class="btn" id="add">+ Товар</button>
+      ${isAdmin ? `<a class="btn ghost" href="/api/export.csv" download>⬇ Excel</a>` : ""}
     </div>
-    <div class="card" style="padding:0 6px">
-      <table>
-        <thead><tr>
-          <th>Название</th><th class="hide-m">Штрих-код</th><th class="num">Остаток</th>
-          ${isAdmin ? `<th class="num hide-m">Закупка</th>` : ""}<th class="num">Цена</th>
-        </tr></thead>
-        <tbody>${list.length ? list.map((p) => `
-          <tr class="${isAdmin ? "click" : ""}" data-id="${p.id}">
-            <td>${esc(p.name)}</td>
+    <div class="periods cats">
+      <button data-cat="" class="${productCat ? "" : "on"}">Все · ${found.length}</button>
+      ${Object.keys(counts).sort((a, b) => counts[b] - counts[a]).map((c) =>
+        `<button data-cat="${esc(c)}" class="${productCat === c ? "on" : ""}">${esc(catIcon(c === "Прочее" ? "" : c))} ${esc(c)} · ${counts[c]}</button>`).join("")}
+    </div>
+    ${list.length ? order.map((c) => `
+      <h3>${esc(catIcon(c === "Прочее" ? "" : c))} ${esc(c)}</h3>
+      <div class="card" style="padding:0 6px">
+        <table><tbody>${groups[c].map((p) => `
+          <tr class="click" data-id="${p.id}">
+            <td style="width:52px">${thumb(p, 40)}</td>
+            <td>${esc(p.name)}<div class="muted hide-d">${esc(p.barcode || "")}</div></td>
             <td class="hide-m muted">${esc(p.barcode || "—")}</td>
             <td class="num ${p.qty <= 2 ? "low" : ""}">${qtyFmt(p.qty)}</td>
-            ${isAdmin ? `<td class="num hide-m">${money(p.buy_price)}</td>` : ""}
+            ${isAdmin ? `<td class="num hide-m muted">${money(p.buy_price)}</td>` : ""}
             <td class="num">${money(p.sell_price)}</td>
-          </tr>`).join("") : `<tr><td colspan="5" class="empty">${productQuery ? "Ничего не найдено" : "Товаров пока нет"}</td></tr>`}
-        </tbody>
-      </table>
-    </div>
+          </tr>`).join("")}</tbody></table>
+      </div>`).join("") : `<div class="card empty">${productQuery ? "Ничего не найдено" : "Товаров пока нет"}</div>`}
     <div class="muted">Позиций: ${list.length} · единиц на складе: ${qtyFmt(totalQty)}</div>`;
 
-  const q = $("#pq");
-  q.oninput = () => {
-    productQuery = q.value.trim();
-    const pos = q.selectionStart;
+  const qi = $("#pq");
+  qi.oninput = () => {
+    productQuery = qi.value.trim();
+    const pos = qi.selectionStart;
     refreshView();
     const nq = $("#pq"); nq.focus(); nq.setSelectionRange(pos, pos);
   };
-  if (!isAdmin) return;
+  main.querySelectorAll("[data-cat]").forEach((b) => (b.onclick = () => { productCat = b.dataset.cat; refreshView(); }));
   $("#add").onclick = () => productForm(null, "");
-  main.querySelectorAll("tr.click").forEach((tr) => (tr.onclick = () => productForm(state.products.find((p) => p.id === Number(tr.dataset.id)))));
+  main.querySelectorAll("tr.click").forEach((tr) => (tr.onclick = () => productCard(state.products.find((p) => p.id === Number(tr.dataset.id)))));
 }
 
+// ---------- Форма товара ----------
 function productForm(p, barcode = "") {
   const isNew = !p;
-  modal(isNew ? "Новый товар" : "Товар", `
+  const isAdmin = state.user.role === "admin";
+  if (!isNew && !isAdmin) return productCard(p);
+  let photo = { data: null, url: null, removed: false };
+
+  modal(isNew ? "Новый товар" : "Изменить товар", `
     <form class="form" id="pf">
-      <label>Название<input name="name" type="text" value="${esc(p?.name || "")}" required></label>
+      <div class="pf-photo">
+        <div class="pf-img" id="pf-img">${p?.image ? `<img src="${esc(imgSrc(p))}" alt="">` : `<span>📷</span>`}</div>
+        <div class="pf-photo-btns">
+          <button type="button" class="btn light" id="pf-shot">${p?.image ? "Заменить фото" : "Сфотографировать"}</button>
+          <button type="button" class="btn ghost" id="pf-noimg" ${p?.image ? "" : "hidden"}>Убрать фото</button>
+          <div class="muted">Фото подтянется само, если товар найдётся по штрих-коду</div>
+        </div>
+      </div>
       <label>Штрих-код
         <div class="scan"><input name="barcode" type="text" value="${esc(p?.barcode ?? barcode)}" placeholder="Можно оставить пустым">
         <button type="button" class="btn icon light" id="pf-cam" title="Сканировать камерой">📷</button>
-        <button type="button" class="btn icon light" id="pf-find" title="Найти название по штрих-коду">🔍</button></div>
+        <button type="button" class="btn icon light" id="pf-find" title="Найти по штрих-коду">🔍</button></div>
       </label>
       <div id="pf-found" class="found" hidden></div>
+      <label>Название<input name="name" type="text" value="${esc(p?.name || "")}" required autocomplete="off"></label>
+      <label>Категория <span id="pf-auto" class="muted"></span>
+        <input name="category" type="text" list="pf-cats" value="${esc(p?.category || "")}" placeholder="Определится по названию" autocomplete="off">
+        <datalist id="pf-cats">${state.categories.map((c) => `<option value="${esc(c)}">`).join("")}</datalist>
+      </label>
       <div class="row">
-        <label>${isNew ? "Количество" : "Остаток"}<input name="qty" type="text" inputmode="decimal" value="${p ? p.qty : 0}"></label>
+        <label>${isNew ? "Количество" : "Остаток"}<input name="qty" type="text" inputmode="decimal" value="${p ? p.qty : 1}"></label>
         <label>Закупочная цена<input name="buy_price" type="text" inputmode="decimal" value="${p?.buy_price ?? ""}" placeholder="0"></label>
         <label>Розничная цена<input name="sell_price" type="text" inputmode="decimal" value="${p?.sell_price ?? ""}" placeholder="0"></label>
       </div>
       ${!isNew ? `<div class="muted">Остаток лучше менять через «Приход». Ручная правка записывается как корректировка.</div>` : ""}
+      ${isNew && !isAdmin ? `<div class="muted">Закупочную цену после сохранения видит только владелец.</div>` : ""}
       <div id="margin" class="muted"></div>
       <div class="row">
-        <button class="btn big">${isNew ? "Добавить" : "Сохранить"}</button>
+        <button class="btn big" id="pf-save">${isNew ? "Добавить" : "Сохранить"}</button>
         ${!isNew ? `<button type="button" class="btn danger" id="pf-del">Удалить</button>` : ""}
       </div>
     </form>`, (root, close) => {
     const f = $("#pf", root);
-    if (barcode && isNew) setTimeout(() => f.name.focus(), 0);
+    const imgBox = $("#pf-img", root);
+    const setPreview = (src) => {
+      imgBox.innerHTML = src ? `<img src="${esc(src)}" alt="" referrerpolicy="no-referrer">` : `<span>📷</span>`;
+      const im = imgBox.querySelector("img");
+      if (im) im.onerror = () => { imgBox.innerHTML = `<span>📷</span>`; if (photo.url === src) photo.url = null; };
+      $("#pf-noimg", root).hidden = !src;
+      $("#pf-shot", root).textContent = src ? "Заменить фото" : "Сфотографировать";
+    };
+    $("#pf-shot", root).onclick = async () => {
+      const data = await pickPhoto();
+      if (data) { photo = { data, url: null, removed: false }; setPreview(data); }
+    };
+    $("#pf-noimg", root).onclick = () => { photo = { data: null, url: null, removed: true }; setPreview(""); };
+
+    // Категория: подсказываем по названию, пока человек не выбрал её сам
+    let catTouched = !!p?.category;
+    const autoLabel = $("#pf-auto", root);
+    const autoCat = (hint) => {
+      if (catTouched) return;
+      const c = Categories.guessCategory(f.name.value, hint);
+      f.category.value = c;
+      autoLabel.textContent = c ? "· определена автоматически" : "";
+    };
+    f.category.oninput = () => { catTouched = !!f.category.value.trim(); autoLabel.textContent = ""; };
+    f.name.addEventListener("input", () => autoCat());
+
     const showMargin = () => {
       const b = toNum(f.buy_price.value), s = toNum(f.sell_price.value);
       $("#margin", root).textContent = b > 0 && s > 0 ? `Наценка: ${money(s - b)} (${Math.round(((s - b) / b) * 100)}%)` : "";
     };
     f.buy_price.oninput = f.sell_price.oninput = showMargin;
     showMargin();
-    // Поиск названия в открытых базах штрих-кодов
+
+    // Поиск названия, фото и категории в базах штрих-кодов
     const info = $("#pf-found", root);
     const findName = async (auto) => {
-      const code = f.barcode.value.trim();
+      const code = normCode(f.barcode.value);
       if (!/^\d{8,14}$/.test(code)) { if (!auto) toast("Сначала укажите штрих-код (8–14 цифр)", "err"); return; }
       info.hidden = false;
-      info.innerHTML = `<span class="spin"></span> Ищу название по штрих-коду…`;
+      info.innerHTML = `<span class="spin"></span> Ищу товар по штрих-коду…`;
       try {
         const r = await api("GET", "/api/lookup/" + code);
         if (!f.isConnected) return;
         const typed = f.name.value.trim();
         if (!typed || !auto) f.name.value = r.full_name;
+        if (r.image && !photo.data && (isNew || !p?.image)) { photo = { data: null, url: r.image, removed: false }; setPreview(r.image); }
+        if (!catTouched && r.category) { f.category.value = r.category; autoLabel.textContent = "· определена автоматически"; }
+        else autoCat(r.category);
         info.innerHTML = `
-          ${r.image ? `<img src="${esc(r.image)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ""}
-          <div><b>Найдено:</b> ${esc(r.full_name)}<div class="muted">Источник: ${esc(r.source)}. Проверьте и при необходимости исправьте название.</div>
+          <div><b>Найдено:</b> ${esc(r.full_name)}<div class="muted">Источник: ${esc(r.source)}. Проверьте и при необходимости исправьте.</div>
           ${typed && auto ? `<button type="button" class="btn light" id="pf-use">Взять это название</button>` : ""}</div>`;
         const use = $("#pf-use", root);
-        if (use) use.onclick = () => { f.name.value = r.full_name; use.remove(); };
+        if (use) use.onclick = () => { f.name.value = r.full_name; autoCat(r.category); use.remove(); };
         if (auto) setTimeout(() => { const el = f.name.value === r.full_name ? f.qty : f.name; el.focus(); el.select(); }, 0);
       } catch (e) {
         if (!f.isConnected) return;
-        info.innerHTML = `<div class="muted">${esc(e.message)}. Введите название вручную.</div>`;
+        info.innerHTML = `<div class="muted">${esc(e.message)}. Введите название вручную${isNew ? " и при желании сфотографируйте товар" : ""}.</div>`;
+        if (auto) setTimeout(() => f.name.focus(), 0);
       }
     };
     $("#pf-find", root).onclick = () => findName(false);
     $("#pf-cam", root).onclick = () => openCamera((code) => { f.barcode.value = normCode(code); beep(); if (isNew) findName(true); });
     if (isNew && barcode) findName(true);
+    else if (isNew) setTimeout(() => f.name.focus(), 0);
+    if (!catTouched) autoCat();
+
     f.onsubmit = async (e) => {
       e.preventDefault();
+      const btn = $("#pf-save", root);
+      btn.disabled = true;
       const body = {
         name: f.name.value, barcode: normCode(f.barcode.value), qty: f.qty.value || 0,
+        category: f.category.value.trim(),
         buy_price: f.buy_price.value || 0, sell_price: f.sell_price.value || 0,
       };
+      if (photo.data) body.image_data = photo.data;
+      else if (photo.url) body.image_url = photo.url;
       try {
-        if (isNew) await api("POST", "/api/products", body);
-        else await api("PUT", `/api/products/${p.id}`, body);
-        toast(isNew ? "Товар добавлен" : "Сохранено", "ok");
-        await loadProducts();
+        const saved = isNew ? await api("POST", "/api/products", body) : await api("PUT", `/api/products/${p.id}`, body);
+        if (photo.removed && !isNew) await api("DELETE", `/api/products/${p.id}/image`);
+        toast(isNew ? `Добавлено в «${catName(saved.category)}»` : "Сохранено", "ok");
+        await Promise.all([loadProducts(), loadCategories()]);
         close();
-      } catch (err) { toast(err.message, "err"); }
+      } catch (err) { toast(err.message, "err"); btn.disabled = false; }
     };
     const del = $("#pf-del", root);
     if (del) del.onclick = async () => {
@@ -640,6 +799,11 @@ async function renderReports(main) {
 
       ${r.low.length ? `<div class="card"><h2>Заканчивается</h2>
         ${r.low.map((p) => `<span class="badge warn" style="margin:2px">${esc(p.name)}: ${qtyFmt(p.qty)}</span>`).join(" ")}</div>` : ""}
+
+      ${r.cats.length ? `<div class="card"><h2>Продажи по категориям</h2>
+        <table><thead><tr><th>Категория</th><th class="num">Выручка</th><th class="num">Прибыль</th></tr></thead>
+        <tbody>${r.cats.map((c) => `<tr><td>${esc(catIcon(c.name === "Прочее" ? "" : c.name))} ${esc(c.name)}</td>
+          <td class="num">${money(c.revenue)}</td><td class="num">${money(c.profit)}</td></tr>`).join("")}</tbody></table></div>` : ""}
 
       <div class="card"><h2>Что продаётся лучше</h2>
         ${r.top.length ? `<table><thead><tr><th>Товар</th><th class="num">Кол-во</th><th class="num">Выручка</th><th class="num">Прибыль</th></tr></thead>
@@ -736,7 +900,7 @@ async function start() {
     const me = await api("GET", "/api/me");
     state.user = me;
     state.version = me.version;
-    await loadProducts();
+    await Promise.all([loadProducts(), loadCategories()]);
   } catch { state.user = null; }
   render();
 }
