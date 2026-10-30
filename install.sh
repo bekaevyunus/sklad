@@ -12,10 +12,27 @@ die() { printf '\n\033[1;31mОшибка: %s\033[0m\n' "$*"; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "запустите под root (или через sudo)."
 
-say "Устанавливаю Docker и git (если их ещё нет)"
-if ! command -v git >/dev/null; then apt-get update -qq && apt-get install -y -qq git curl >/dev/null; fi
-if ! command -v docker >/dev/null; then curl -fsSL https://get.docker.com | sh >/dev/null; fi
+say "Устанавливаю Docker и git (если их ещё нет) — это 1–3 минуты"
+export DEBIAN_FRONTEND=noninteractive
+if ! command -v git >/dev/null || ! command -v curl >/dev/null; then
+  apt-get update -q && apt-get install -y -q git curl
+fi
+if ! docker compose version >/dev/null 2>&1; then
+  # Сначала из репозитория Ubuntu (работает из России), если не вышло — официальный скрипт Docker
+  apt-get update -q
+  apt-get install -y -q docker.io docker-compose-v2 \
+    || timeout 600 bash -c 'curl -fsSL https://get.docker.com | sh' \
+    || die "не удалось установить Docker."
+fi
 docker compose version >/dev/null 2>&1 || die "не удалось установить docker compose."
+
+# Зеркало Docker Hub на случай, если он недоступен из России
+if [ ! -f /etc/docker/daemon.json ]; then
+  mkdir -p /etc/docker
+  echo '{ "registry-mirrors": ["https://mirror.gcr.io"] }' > /etc/docker/daemon.json
+fi
+systemctl enable --now docker >/dev/null 2>&1 || true
+systemctl restart docker
 
 say "Скачиваю приложение в $DIR"
 if [ -d "$DIR/.git" ]; then
